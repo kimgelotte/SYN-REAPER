@@ -1,0 +1,39 @@
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets - never commit
+.env
+.env.local
+.env.*.local
+
+# Scan reports and AI summaries (may contain IPs, findings)
+report.html
+report.json
+report.txt
+report.sarif
+summary.txt
+summary.html
+*.sarif

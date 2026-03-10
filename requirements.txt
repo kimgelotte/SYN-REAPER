@@ -1,0 +1,23 @@
+# Security Scanner - Dependencies
+# Core: Python stdlib only (TCP Connect, basic UDP, banner grab)
+# Full features: scapy for SYN scan, UDP ICMP, stack fingerprinting
+scapy>=2.5.0
+
+# Optional - for exploit/bruteforce:
+# pip install pymysql   - MySQL checks
+# pip install pysmb     - SMB null session
+# pip install paramiko  - SSH brute force
+
+# Deep security checks:
+cryptography>=41.0
+pysnmp>=4.4
+impacket>=0.10
+paramiko>=3.0
+
+# Optional - for extended checks:
+# pip install psycopg2  - PostgreSQL brute
+# pip install pymongo   - MongoDB auth check
+
+# Optional - for AI report analysis (analyze.py):
+# pip install openai      - AI executive summary
+# pip install python-dotenv - Load .env for API keys
