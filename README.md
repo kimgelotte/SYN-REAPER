@@ -482,7 +482,7 @@ Use `--compliance` to include a control matrix in reports:
 
 ## License
 
-[Specify your license, e.g. MIT, GPL-3.0]
+MIT License. See [LICENSE](LICENSE) for details.
 
 ## Disclaimer
 
