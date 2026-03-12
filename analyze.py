@@ -93,14 +93,42 @@ def _build_prompt(report: dict, max_chars: int = 12000) -> str:
     return report_str
 
 
-def analyze_with_openai(
+EXECUTIVE_SYSTEM_PROMPT = """You are a security analyst. Analyze this vulnerability scan report and provide:
+1. EXECUTIVE SUMMARY: 2-3 sentences on overall risk and key concerns.
+2. TOP 5 PRIORITIES: Most critical findings to address first (host/port, finding, why it matters).
+3. NEXT STEPS: 3-5 concrete recommended actions.
+
+Be concise. Use plain language for non-technical readers. Focus on business impact."""
+
+def _default_model(base_url: str | None) -> str:
+    """Default model: Ollama/local often use llama3.1; OpenAI uses gpt-4o-mini."""
+    if os.environ.get("AI_MODEL"):
+        return os.environ.get("AI_MODEL", "gpt-4o-mini")
+    if base_url and ("11434" in str(base_url) or "localhost" in str(base_url).lower()):
+        return "llama3.1"
+    return "gpt-4o-mini"
+
+
+RED_TEAM_SYSTEM_PROMPT = """You are an expert penetration tester / red teamer. Think like an attacker. Analyze this vulnerability scan report from a hacker's perspective.
+
+Provide:
+1. ATTACKER VIEW: In 2-4 sentences, what does an attacker see here? What's the most attractive entry point and why?
+2. ATTACK CHAINS: What would you try first? List 3-5 concrete attack steps (e.g. "Brute force router admin → pivot to LAN", "Exploit X on port Y → credential access"). Be specific to the hosts and services in the report.
+3. PRIORITY TARGETS: Which host(s) and service(s) would you prioritize and why (e.g. default creds, known CVEs, missing auth)?
+4. FIX FROM ATTACKER'S EYES: What would make you give up or move on? Give 3-5 defensive actions that directly block the attacks you described.
+
+Write in direct, red-team language. Be practical and specific. No generic advice—tie every point to findings in the report."""
+
+
+def _call_openai(
     report: dict,
-    anonymize: bool | None = None,
-    model: str = "gpt-4o-mini",
-    base_url: str | None = None,
-    api_key: str | None = None,
+    system_prompt: str,
+    anonymize: bool | None,
+    model: str,
+    base_url: str | None,
+    api_key: str | None,
 ) -> str:
-    """Send report to OpenAI-compatible API and return executive summary."""
+    """Common OpenAI call with given system prompt."""
     try:
         from openai import OpenAI
     except ImportError:
@@ -112,9 +140,8 @@ def analyze_with_openai(
     if not base_url and not api_key:
         sys.exit("Set OPENAI_API_KEY (for OpenAI) or OPENAI_API_BASE (for self-hosted) in .env or environment")
     if base_url and not api_key:
-        api_key = "ollama"  # Self-hosted often ignores key; ollama accepts any string
+        api_key = "ollama"
 
-    # Anonymization: CLI > AI_ANONYMIZE in .env > auto (external=yes, local=no)
     env_anon = os.environ.get("AI_ANONYMIZE", "").lower().strip()
     if anonymize is not None:
         should_anonymize = anonymize
@@ -130,14 +157,6 @@ def analyze_with_openai(
         print("Anonymizing report (IPs/CIDRs removed) before sending to API.", file=sys.stderr)
 
     report_snippet = _build_prompt(report)
-
-    system_prompt = """You are a security analyst. Analyze this vulnerability scan report and provide:
-1. EXECUTIVE SUMMARY: 2-3 sentences on overall risk and key concerns.
-2. TOP 5 PRIORITIES: Most critical findings to address first (host/port, finding, why it matters).
-3. NEXT STEPS: 3-5 concrete recommended actions.
-
-Be concise. Use plain language for non-technical readers. Focus on business impact."""
-
     user_prompt = f"""Analyze this SYN-REAPER security scan report:\n\n{report_snippet}"""
 
     client = OpenAI(api_key=api_key, base_url=base_url) if base_url else OpenAI(api_key=api_key)
@@ -151,6 +170,66 @@ Be concise. Use plain language for non-technical readers. Focus on business impa
         temperature=0.3,
     )
     return response.choices[0].message.content or ""
+
+
+def analyze_with_openai(
+    report: dict,
+    anonymize: bool | None = None,
+    model: str = "gpt-4o-mini",
+    base_url: str | None = None,
+    api_key: str | None = None,
+    persona: str = "executive",
+) -> str:
+    """Send report to OpenAI-compatible API. persona: 'executive' (summary) or 'redteam' (attacker view)."""
+    prompt = RED_TEAM_SYSTEM_PROMPT if persona == "redteam" else EXECUTIVE_SYSTEM_PROMPT
+    return _call_openai(report, prompt, anonymize, model, base_url, api_key)
+
+
+def analyze_redteam_safe(
+    report: dict,
+    model: str | None = None,
+    base_url: str | None = None,
+    api_key: str | None = None,
+    anonymize: bool = True,
+) -> tuple[str | None, str | None]:
+    """
+    Red-team analysis for programmatic use (e.g. web UI). Never sys.exit.
+    Returns (content, None) on success or (None, error_message) on failure.
+    """
+    try:
+        from openai import OpenAI
+    except ImportError:
+        return None, "Install openai: pip install openai"
+
+    base_url = base_url or os.environ.get("OPENAI_API_BASE") or os.environ.get("OPENAI_BASE_URL")
+    api_key = api_key or os.environ.get("OPENAI_API_KEY")
+    if base_url and not api_key:
+        api_key = "ollama"
+    if not base_url and not api_key:
+        return None, "Set OPENAI_API_KEY or OPENAI_API_BASE in .env"
+
+    if model is None:
+        model = _default_model(base_url)
+
+    if anonymize:
+        report = _anonymize_report(report)
+    report_snippet = _build_prompt(report)
+    user_prompt = f"Analyze this SYN-REAPER security scan report:\n\n{report_snippet}"
+
+    try:
+        client = OpenAI(api_key=api_key, base_url=base_url) if base_url else OpenAI(api_key=api_key)
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": RED_TEAM_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            max_tokens=1024,
+            temperature=0.3,
+        )
+        return (response.choices[0].message.content or ""), None
+    except Exception as e:
+        return None, str(e)
 
 
 def main() -> None:
@@ -174,9 +253,15 @@ def main() -> None:
         help="Disable anonymization (use only with self-hosted/trusted API)",
     )
     parser.add_argument(
+        "--persona",
+        choices=("executive", "redteam"),
+        default="executive",
+        help="executive = summary for stakeholders; redteam = attacker view, attack chains (default: executive)",
+    )
+    parser.add_argument(
         "--model",
-        default=os.environ.get("AI_MODEL", "gpt-4o-mini"),
-        help="Model name (default: gpt-4o-mini or AI_MODEL from .env)",
+        default=None,
+        help="Model name (default: from AI_MODEL or auto for Ollama=llama3.1, OpenAI=gpt-4o-mini)",
     )
     parser.add_argument(
         "--base-url",
@@ -198,12 +283,15 @@ def main() -> None:
         report = json.load(f)
 
     anonymize = True if args.anonymize else (False if args.no_anonymize else None)
+    base_url = args.base_url or os.environ.get("OPENAI_API_BASE") or os.environ.get("OPENAI_BASE_URL")
+    model = args.model or os.environ.get("AI_MODEL") or _default_model(base_url)
     print("Analyzing report...", file=sys.stderr)
     summary = analyze_with_openai(
         report,
         anonymize=anonymize,
-        model=args.model,
+        model=model,
         base_url=args.base_url,
+        persona=args.persona,
     )
 
     if args.output:

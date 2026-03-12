@@ -20,6 +20,17 @@ COMMON_PORTS = [
     8883, 10243, 55000, 62078,
 ]
 
+# Router/gateway-specific ports (admin UI, TR-069, UPnP, vendor)
+ROUTER_PORTS = [
+    80, 443, 8080, 8008, 8443, 4433, 8888,  # Web admin
+    22, 23,   # SSH, Telnet
+    53,       # DNS (sometimes open on router)
+    7547,     # TR-069 CWMP (ISP management)
+    8291,     # MikroTik Winbox
+    5000,     # UPnP / vendor
+    161,      # SNMP (often default community)
+]
+
 # Common UDP ports that may respond to probes
 COMMON_UDP_PORTS = [53, 67, 68, 69, 123, 161, 162, 500, 514, 520, 1194, 4500]
 

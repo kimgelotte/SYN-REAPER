@@ -10,27 +10,108 @@ from dataclasses import dataclass
 from typing import Callable, List, Optional, Tuple
 
 from scanner.issues import ScanIssue, _normalize_error
+from scanner.obfuscate import get_http_headers, is_obfuscate, random_delay
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 
 # Default wordlist: (username, password) - common weak credentials
+# Extended with top entries from SecLists / common breach lists (authorized testing only)
 DEFAULT_WORDLIST = [
     ("admin", "admin"),
     ("admin", "password"),
     ("admin", "123456"),
     ("admin", "admin123"),
+    ("admin", "12345678"),
+    ("admin", "123456789"),
+    ("admin", "qwerty"),
+    ("admin", "password1"),
+    ("admin", "1234"),
+    ("admin", "12345"),
+    ("admin", "letmein"),
+    ("admin", "welcome"),
+    ("admin", "monkey"),
+    ("admin", "dragon"),
+    ("admin", "master"),
+    ("admin", "login"),
+    ("admin", "abc123"),
+    ("admin", "111111"),
+    ("admin", "123123"),
+    ("admin", "admin1234"),
+    ("admin", "root"),
+    ("admin", "pass"),
+    ("admin", "passw0rd"),
+    ("admin", "P@ssw0rd"),
+    ("admin", "changeme"),
+    ("admin", "default"),
+    ("admin", "123qwe"),
+    ("admin", "password123"),
+    ("admin", "qwerty123"),
     ("root", "root"),
     ("root", "toor"),
     ("root", "password"),
     ("root", ""),
+    ("root", "123456"),
+    ("root", "12345678"),
+    ("root", "admin"),
+    ("root", "default"),
+    ("root", "letmein"),
     ("user", "user"),
     ("user", "password"),
+    ("user", "123456"),
     ("test", "test"),
+    ("test", "123456"),
     ("guest", "guest"),
+    ("guest", "123456"),
     ("ftp", "ftp"),
     ("oracle", "oracle"),
     ("mysql", "mysql"),
     ("postgres", "postgres"),
+    ("administrator", "administrator"),
+    ("administrator", "password"),
+    ("administrator", "admin"),
+    ("Administrator", "admin"),
+    ("support", "support"),
+    ("service", "service"),
+    ("backup", "backup"),
+    ("operator", "operator"),
+    ("pi", "raspberry"),  # Raspberry Pi default
+]
+
+# Router/gateway default logins (admin UIs, telnet) - try when pen testing the router
+ROUTER_WORDLIST = [
+    ("admin", "admin"),
+    ("admin", "password"),
+    ("admin", "1234"),
+    ("admin", "123456"),
+    ("admin", ""),
+    ("admin", "router"),
+    ("admin", "wireless"),
+    ("admin", "admin123"),
+    ("admin", "12345678"),
+    ("admin", "qwerty"),
+    ("admin", "letmein"),
+    ("admin", "welcome"),
+    ("admin", "default"),
+    ("admin", "smcadmin"),  # SMC/Arris
+    ("Administrator", "admin"),
+    ("Administrator", "password"),
+    ("root", "admin"),
+    ("root", "root"),
+    ("root", "password"),
+    ("root", ""),
+    ("root", "1234"),
+    ("root", "123456"),
+    ("support", "support"),
+    ("user", "user"),
+    ("user", "password"),
+    ("guest", "guest"),
+    ("", "admin"),
+    ("cusadmin", "password"),  # Some ISP routers
+    ("zte", "zte"),  # ZTE
+    ("admin", "nE7jA%5m"),  # Vodafone/Thomson
+    ("admin", "telecomadmin"),
+    ("admin", "fiberhome"),
+    ("admin", "huawei"),
 ]
 
 
@@ -85,7 +166,7 @@ def _try_http_basic(host: str, port: int, user: str, password: str, timeout: flo
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
         # First check if auth is required
-        req_anon = Request(url, headers={"User-Agent": "SYN-REAPER/1.0"})
+        req_anon = Request(url, headers=get_http_headers())
         try:
             with urlopen(req_anon, timeout=timeout, context=ctx) as r:
                 if r.status == 200:
@@ -95,7 +176,7 @@ def _try_http_basic(host: str, port: int, user: str, password: str, timeout: flo
                 return False  # Not an auth challenge
         # Server wants auth - try credentials
         creds = base64.b64encode(f"{user}:{password}".encode()).decode()
-        req = Request(url, headers={"Authorization": f"Basic {creds}", "User-Agent": "SYN-REAPER/1.0"})
+        req = Request(url, headers=get_http_headers(extra={"Authorization": f"Basic {creds}"}))
         with urlopen(req, timeout=timeout, context=ctx) as r:
             return r.status == 200
     except HTTPError as e:
@@ -215,6 +296,8 @@ def bruteforce_port(
                 detail=str(e)[:200],
             )
         time.sleep(delay)
+        if is_obfuscate():
+            random_delay(0, 0.5)
     return None, None
 
 
@@ -225,9 +308,13 @@ def run_bruteforce(
     timeout: float = 3.0,
     delay: float = 0.5,
     on_progress: Optional[Callable[[str, int, str, str, str], None]] = None,
+    is_router: bool = False,
+    use_ai_wordlist: bool = False,
 ) -> Tuple[List[BruteResult], List[ScanIssue]]:
     """
     Run brute force on all bruteforceable ports.
+    When is_router=True, also tries ROUTER_WORDLIST (gateway admin / telnet defaults).
+    When use_ai_wordlist=True, asks the AI for credentials per port (falls back to wordlist if AI fails).
     Returns (results, issues). issues contains reasons for incomplete/aborted attempts.
     """
     results = []
@@ -244,16 +331,35 @@ def run_bruteforce(
                         wordlist.append((u.strip(), p.strip()))
         except Exception as e:
             issues.append(ScanIssue("bruteforce", f"Failed to load wordlist: {e}", detail=str(e)))
+    if wordlist is None:
+        wordlist = list(DEFAULT_WORDLIST)
+    if is_router:
+        seen = {(u, p) for u, p in wordlist}
+        for u, p in ROUTER_WORDLIST:
+            if (u, p) not in seen:
+                wordlist.append((u, p))
+                seen.add((u, p))
 
     def _on_attempt(h: str, pt: int, svc: str, u: str, p: str):
         if on_progress:
             on_progress(h, pt, svc, u, p)
 
     for port in ports:
-        if port in BRUTE_HANDLERS:
-            r, issue = bruteforce_port(host, port, wordlist, timeout, delay, _on_attempt)
-            if r:
-                results.append(r)
-            elif issue:
-                issues.append(issue)
+        if port not in BRUTE_HANDLERS:
+            continue
+        service, _ = BRUTE_HANDLERS[port]
+        port_wordlist = wordlist
+        if use_ai_wordlist:
+            try:
+                from scanner.ai_bruteforce import get_ai_bruteforce_credentials
+                ai_pairs = get_ai_bruteforce_credentials(host, port, service, is_router=is_router)
+                if ai_pairs:
+                    port_wordlist = ai_pairs
+            except Exception:
+                pass
+        r, issue = bruteforce_port(host, port, port_wordlist, timeout, delay, _on_attempt)
+        if r:
+            results.append(r)
+        elif issue:
+            issues.append(issue)
     return results, issues

@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from typing import List
 from urllib.request import Request, urlopen
 
+from scanner.obfuscate import get_http_headers
+
 
 @dataclass
 class HeaderFinding:
@@ -31,7 +33,7 @@ def check_http_headers(host: str, port: int, use_https: bool = False, timeout: f
         ctx.verify_mode = ssl.CERT_NONE
 
     try:
-        req = Request(url, headers={"User-Agent": "SYN-REAPER/1.0"})
+        req = Request(url, headers=get_http_headers())
         with urlopen(req, timeout=timeout, context=ctx) as r:
             headers = {k.lower(): v for k, v in r.headers.items()}
     except Exception:

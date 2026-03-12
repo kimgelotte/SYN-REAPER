@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from typing import Optional
 from urllib.request import Request, urlopen
 
+from scanner.obfuscate import get_http_headers
+
 
 @dataclass
 class DeviceInfo:
@@ -116,7 +118,7 @@ def _fetch_http_content(host: str, port: int, timeout: float = 2.0) -> Optional[
     """Fetch HTTP page content for analysis."""
     try:
         url = f"http://{host}:{port}/" if port != 80 else f"http://{host}/"
-        req = Request(url, headers={"User-Agent": "SYN-REAPER/1.0"})
+        req = Request(url, headers=get_http_headers())
         with urlopen(req, timeout=timeout) as r:
             return r.read().decode("utf-8", errors="ignore").lower()
     except Exception:
@@ -131,7 +133,7 @@ def _fetch_https_content(host: str, port: int, timeout: float = 2.0) -> Optional
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         url = f"https://{host}:{port}/" if port != 443 else f"https://{host}/"
-        req = Request(url, headers={"User-Agent": "SYN-REAPER/1.0"})
+        req = Request(url, headers=get_http_headers())
         with urlopen(req, timeout=timeout, context=ctx) as r:
             return r.read().decode("utf-8", errors="ignore").lower()
     except Exception:

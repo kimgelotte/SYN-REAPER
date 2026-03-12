@@ -5,6 +5,7 @@ WARNING: Authorized testing only. Unauthorized scanning may violate laws.
 
 import argparse
 import os
+import random
 import sys
 import time
 from datetime import datetime
@@ -26,13 +27,15 @@ def _env_bool(key: str, default: bool = False) -> bool:
         return default
     return val in ("1", "true", "yes", "on")
 
-from scanner.network import discover_hosts, get_all_hosts
+from scanner.network import discover_hosts, get_all_hosts, get_default_gateway, arp_discover_with_mac
 from scanner.ports import (
     tcp_connect_scan,
     syn_scan,
     udp_scan,
     scan_ports,
     SCAPY_AVAILABLE,
+    COMMON_PORTS,
+    ROUTER_PORTS,
 )
 from scanner.vulnerability import check_port_vulnerability, VulnerabilityFinding
 from scanner.fingerprint import fingerprint_host, FingerprintResult
@@ -48,6 +51,10 @@ from scanner.version import get_version_finding, VersionFinding
 from scanner.web_headers import run_web_header_checks, HeaderFinding
 from scanner.injection import run_injection_probes, InjectionFinding
 from scanner.container import run_container_checks, ContainerFinding
+from scanner.web_probes import run_web_advanced_probes, WebProbeFinding
+from scanner.wifi import scan_wifi_networks, WiFiNetwork
+from scanner.obfuscate import set_obfuscate, random_delay
+from scanner.post_exploit import run_post_exploit, PostExploitFinding
 
 
 def format_finding(f: VulnerabilityFinding) -> str:
@@ -133,6 +140,23 @@ def format_container_finding(f: ContainerFinding) -> str:
     return f"  [{f.port}] {f.service}: {f.check} - {f.severity.upper()} - {f.details}"
 
 
+def format_web_probe_finding(f: WebProbeFinding) -> str:
+    """Format web probe (XSS/path traversal) finding for display."""
+    return f"  [{f.port}] {f.check}: {f.severity.upper()} - {f.details}"
+
+
+def format_post_exploit(f: PostExploitFinding) -> str:
+    """Format post-exploitation finding for display."""
+    return f"  [{f.port}] {f.service} as {f.username} ({f.access_level}): {f.details}"
+
+
+def format_wifi_network(w: WiFiNetwork) -> str:
+    """Format WiFi network for display."""
+    sig = f" {w.signal}%" if w.signal is not None else ""
+    ch = f" ch{w.channel}" if w.channel is not None else ""
+    return f"  {w.ssid or '(hidden)'}  {w.bssid}{sig}{ch}  {w.security}"
+
+
 def run_scan(
     target: str,
     skip_discovery: bool = False,
@@ -158,8 +182,18 @@ def run_scan(
     dry_run: bool = False,
     profile: Optional[str] = None,
     compliance_profile: Optional[str] = None,
+    web_advanced: bool = False,
+    write_report_after_each_host: bool = False,
+    wifi: bool = False,
+    include_router: bool = False,
+    use_ai_wordlist: bool = False,
+    obfuscate: bool = False,
+    post_exploit: bool = False,
 ) -> None:
     """Run full scan: discover hosts, scan ports, check vulnerabilities."""
+    set_obfuscate(obfuscate)
+    if obfuscate:
+        print("Obfuscation on: browser-like headers, randomized port order, reduced concurrency, pacing.\n")
     # Warning banner
     print("WARNING: Authorized testing only. Unauthorized scanning may violate laws.\n")
 
@@ -180,13 +214,20 @@ def run_scan(
 
     # Apply profile overrides (profile sets baseline; explicit flags can add)
     if profile == "quick":
-        exploit, bruteforce, ssl_check, ssh_audit, web_deep, injection = False, False, False, False, False, False
+        exploit, bruteforce, ssl_check, ssh_audit, web_deep, injection, web_advanced = (
+            False, False, False, False, False, False, False,
+        )
     elif profile == "standard":
         exploit = exploit or True
         bruteforce = bruteforce or True
         injection = False
     elif profile == "deep":
         exploit, bruteforce, ssl_check, ssh_audit, web_deep, injection = True, True, True, True, True, True
+    elif profile == "pentest":
+        exploit, bruteforce, ssl_check, ssh_audit, web_deep, injection, web_advanced = (
+            True, True, True, True, True, True, True,
+        )
+        post_exploit = post_exploit or True
     if skip_discovery:
         hosts = [target]
     elif scan_all and "/" in target:
@@ -196,7 +237,8 @@ def run_scan(
         hosts = discover_hosts(target, timeout=int(timeout))
     if not hosts:
         print(f"No hosts found for {target}")
-        print("Tip: Use --scan-all to skip ping and scan all IPs (useful when ICMP is blocked)")
+        print("Tip: Use --scan-all (-A) to skip ping and scan all IPs in the range (ICMP is often blocked).")
+        print("     Example: python main.py 192.168.1.0/24 --scan-all")
         return
 
     if scope_file:
@@ -212,6 +254,16 @@ def run_scan(
             print(f"Scope file not found: {scope_file}")
             return
 
+    gateway_ip: Optional[str] = None
+    if include_router:
+        gateway_ip = get_default_gateway()
+        if gateway_ip:
+            if gateway_ip not in hosts:
+                hosts = [gateway_ip] + [h for h in hosts if h != gateway_ip]
+            print(f"Including router (gateway) in pen test: {gateway_ip}")
+        else:
+            print("Include router requested but could not detect default gateway.")
+
     scan_name = {"connect": "TCP Connect", "syn": "SYN (half-open)"}.get(scan_type, "TCP Connect")
     if scan_type == "syn" and not SCAPY_AVAILABLE:
         print("Note: SYN scan requires scapy. Falling back to TCP Connect. Install: pip install scapy")
@@ -223,6 +275,30 @@ def run_scan(
         timestamp=datetime.now().isoformat(),
         compliance_profile=compliance_profile,
     ) if report_path else None
+
+    if report and report_path and write_report_after_each_host and Path(report_path).suffix.lower() == ".json":
+        report.write_json(report_path)  # initial write so UI can show target/metadata immediately
+
+    # WiFi scan (uses system wireless adapter)
+    if wifi:
+        print("WiFi scan (nearby networks)...")
+        try:
+            wifi_networks = scan_wifi_networks(timeout=15)
+            if wifi_networks:
+                print(f"  Found {len(wifi_networks)} network(s):")
+                for w in wifi_networks:
+                    print(format_wifi_network(w))
+                if report:
+                    report.wifi_networks = [
+                        {"ssid": w.ssid, "bssid": w.bssid, "signal": w.signal, "channel": w.channel, "security": w.security}
+                        for w in wifi_networks
+                    ]
+                    if report_path and Path(report_path).suffix.lower() == ".json":
+                        report.write_json(report_path)
+            else:
+                print("  No WiFi networks found (or adapter not available).")
+        except Exception as e:
+            print(f"  WiFi scan failed: {e}")
 
     total_hosts = len(hosts)
     print(f"Scanning {total_hosts} host(s) [{scan_name}]...\n")
@@ -239,17 +315,26 @@ def run_scan(
     for idx, host in enumerate(hosts, 1):
         if rate_limit and rate_limit > 0 and idx > 1:
             time.sleep(1.0 / rate_limit)
+        if obfuscate and idx > 1:
+            random_delay(0.5, 1.5)
         host_issues: List[ScanIssue] = []
+        # Router/gateway gets extra ports (admin UI, TR-069, etc.)
+        is_router_host = include_router and gateway_ip and host == gateway_ip
+        base_ports = custom_ports or COMMON_PORTS
+        ports_for_host = sorted(set(list(base_ports) + (ROUTER_PORTS if is_router_host else [])))
+        if obfuscate:
+            random.shuffle(ports_for_host)
+        scan_workers = 12 if obfuscate else 100
         try:
             progress_cb = make_progress_callback(idx, host) if show_progress else None
 
             # TCP scan
             if scan_type == "syn":
-                open_tcp = syn_scan(host, ports=custom_ports, timeout=timeout,
-                                   on_progress=progress_cb)
+                open_tcp = syn_scan(host, ports=ports_for_host, timeout=timeout,
+                                   max_workers=min(scan_workers, 50), on_progress=progress_cb)
             else:
-                open_tcp = tcp_connect_scan(host, ports=custom_ports, timeout=timeout,
-                                           on_progress=progress_cb)
+                open_tcp = tcp_connect_scan(host, ports=ports_for_host, timeout=timeout,
+                                           max_workers=scan_workers, on_progress=progress_cb)
             if show_progress:
                 sys.stdout.write("\r" + " " * 80 + "\r")  # Clear progress line
                 sys.stdout.flush()
@@ -260,7 +345,7 @@ def run_scan(
                 if show_progress:
                     sys.stdout.write(f"  Host {idx}/{total_hosts}: {host} - UDP scan...    \r")
                     sys.stdout.flush()
-                open_udp = udp_scan(host, ports=custom_ports, timeout=max(timeout, 2.0))
+                open_udp = udp_scan(host, ports=ports_for_host, timeout=max(timeout, 2.0))
                 if show_progress:
                     sys.stdout.write("\r" + " " * 80 + "\r")
                     sys.stdout.flush()
@@ -406,6 +491,17 @@ def run_scan(
                     for f in container_findings:
                         print(format_container_finding(f))
 
+            # Web advanced (XSS / path traversal) - pentest-level probes
+            web_probe_findings: List[WebProbeFinding] = []
+            if web_advanced and exploit:
+                web_ports = [p for p in open_tcp if p in (80, 443, 8080, 8443, 8000, 8888, 4433)]
+                if web_ports:
+                    web_probe_findings = run_web_advanced_probes(host, web_ports, timeout=timeout)
+                    if web_probe_findings:
+                        print("\n  Web penetration probes (XSS / path traversal):")
+                        for f in web_probe_findings:
+                            print(format_web_probe_finding(f))
+
             # Exploit attempts
             exploit_results: List[ExploitResult] = []
             if exploit:
@@ -427,6 +523,8 @@ def run_scan(
                     timeout=timeout,
                     delay=bruteforce_delay,
                     on_progress=lambda h, p, s, u, pw: (sys.stdout.write(f"\r    Trying {s} {u}:{pw}...    "), sys.stdout.flush()),
+                    is_router=is_router_host,
+                    use_ai_wordlist=use_ai_wordlist,
                 )
                 host_issues.extend(brute_issues)
                 if show_progress and brute_results:
@@ -441,6 +539,24 @@ def run_scan(
                         print(format_issue(i))
                 else:
                     print("  No credentials found.")
+
+            # Post-exploitation reconnaissance (after brute force cracks credentials)
+            post_exploit_results: List[PostExploitFinding] = []
+            if post_exploit and brute_results:
+                successful_brutes = [b for b in brute_results if getattr(b, "success", True)]
+                if successful_brutes:
+                    print("\n  Post-exploitation recon:")
+                    post_exploit_results = run_post_exploit(
+                        host=host,
+                        brute_results=brute_results,
+                        open_ports=open_tcp,
+                        on_progress=lambda msg: print(f"  {msg}"),
+                    )
+                    if post_exploit_results:
+                        for pe in post_exploit_results:
+                            print(format_post_exploit(pe))
+                    else:
+                        print("  No additional accessible services found.")
 
             fp_str = None
             if fingerprint:
@@ -460,6 +576,8 @@ def run_scan(
                 exploit_entries.extend([_exploit_entry(f"Header: {h.header}", h.message) for h in header_findings if not h.present])
                 exploit_entries.extend([_exploit_entry("SQLi probe", f"{f.payload_name}: {f.indicator}") for f in injection_findings])
                 exploit_entries.extend([_exploit_entry(f"Container: {f.service}", f.details) for f in container_findings])
+                exploit_entries.extend([_exploit_entry(f"Web: {f.check}", f.details) for f in web_probe_findings])
+                exploit_entries.extend([_exploit_entry(f"PostExploit: {pe.service}", f"{pe.username}@{pe.host}:{pe.port} ({pe.access_level}): {pe.details[:100]}") for pe in post_exploit_results])
                 report.add_host(
                     host=host,
                     open_tcp=open_tcp,
@@ -471,6 +589,8 @@ def run_scan(
                     device_vendor=device_info.vendor,
                     issues=[{"phase": i.phase, "reason": i.reason, "port": i.port} for i in host_issues],
                 )
+                if write_report_after_each_host and report_path and Path(report_path).suffix.lower() == ".json":
+                    report.write_json(report_path)
 
         except (ConnectionError, OSError, TimeoutError) as e:
             host_issues.append(ScanIssue("scan", _normalize_error(e), detail=str(e)))
@@ -480,6 +600,8 @@ def run_scan(
                 report.add_host(host=host, open_tcp=[], open_udp=[], fingerprint=None, findings=[],
                                exploits=[], device=None, device_vendor=None,
                                issues=[{"phase": "scan", "reason": _normalize_error(e), "port": None}])
+                if write_report_after_each_host and report_path and Path(report_path).suffix.lower() == ".json":
+                    report.write_json(report_path)
 
     if report and report_path:
         path = Path(report_path)
@@ -612,6 +734,12 @@ Examples:
         help="Delay between attempts in seconds (default: 0.5)",
     )
     parser.add_argument(
+        "--ai-bruteforce",
+        action="store_true",
+        default=_env_bool("SCAN_AI_BRUTEFORCE"),
+        help="Use AI to suggest bruteforce credentials per port (falls back to wordlist if AI unavailable)",
+    )
+    parser.add_argument(
         "--ssl-check",
         action="store_true",
         default=_env_bool("SCAN_SSL_CHECK"),
@@ -653,12 +781,64 @@ Examples:
     )
     parser.add_argument(
         "--profile",
-        choices=["quick", "standard", "deep"],
+        choices=["quick", "standard", "deep", "pentest"],
         default=os.environ.get("SCAN_PROFILE") or None,
-        help="Scan profile (default: SCAN_PROFILE from .env)",
+        help="Scan profile: quick, standard, deep, or pentest (deep + web-advanced)",
+    )
+    parser.add_argument(
+        "--web-advanced",
+        action="store_true",
+        default=_env_bool("SCAN_WEB_ADVANCED"),
+        help="XSS reflection and path traversal probes (pentest-level)",
+    )
+    parser.add_argument(
+        "--wifi", "-W",
+        action="store_true",
+        default=_env_bool("SCAN_WIFI"),
+        help="Scan nearby WiFi networks (uses system wireless adapter)",
+    )
+    parser.add_argument(
+        "--include-router",
+        action="store_true",
+        default=_env_bool("SCAN_INCLUDE_ROUTER"),
+        help="Include default gateway (router) in pen test: extra ports, admin paths, default creds",
+    )
+    parser.add_argument(
+        "--mac",
+        metavar="MAC",
+        help="Target by MAC address (target must be CIDR, e.g. 192.168.1.0/24). Uses ARP to resolve MAC to IP. E.g. aa:bb:cc:dd:ee:ff",
+    )
+    parser.add_argument(
+        "--obfuscate",
+        action="store_true",
+        default=_env_bool("SCAN_OBFUSCATE"),
+        help="Reduce blocking: browser-like User-Agents, random port order, lower concurrency, pacing (high-quality pen-test, slower)",
+    )
+    parser.add_argument(
+        "--post-exploit",
+        action="store_true",
+        default=_env_bool("SCAN_POST_EXPLOIT"),
+        help="Post-exploitation recon: enumerate SMB shares, FTP, SSH info, DB tables after brute force cracks credentials (auto-enabled with pentest profile)",
     )
 
     args = parser.parse_args()
+    target = args.target
+    skip_discovery = args.skip_discovery
+    if args.mac:
+        mac_raw = args.mac.strip().lower().replace("-", ":")
+        if "/" not in target:
+            parser.error("--mac requires target to be a subnet (CIDR), e.g. 192.168.1.0/24")
+        ip_mac = arp_discover_with_mac(target, timeout=3)
+        ip_for_mac = None
+        for ip, mac in ip_mac:
+            if mac_raw == mac.lower().replace("-", ":"):
+                ip_for_mac = ip
+                break
+        if not ip_for_mac:
+            sys.exit(f"MAC {args.mac} not found in {target}. Run without --mac to scan the subnet.")
+        print(f"Resolved MAC {args.mac} -> {ip_for_mac}")
+        target = ip_for_mac
+        skip_discovery = True
     custom_ports = args.ports
     if args.all_ports and not custom_ports:
         custom_ports = list(range(1, 65536))
@@ -669,8 +849,8 @@ Examples:
         print("Note: --all-ports overrides --ports")
 
     run_scan(
-        target=args.target,
-        skip_discovery=args.skip_discovery,
+        target=target,
+        skip_discovery=skip_discovery,
         scan_all=args.scan_all,
         custom_ports=custom_ports,
         no_banner=args.no_banner,
@@ -693,6 +873,12 @@ Examples:
         dry_run=args.dry_run,
         profile=args.profile,
         compliance_profile=args.compliance,
+        web_advanced=args.web_advanced,
+        wifi=args.wifi,
+        include_router=args.include_router,
+        use_ai_wordlist=args.ai_bruteforce,
+        obfuscate=args.obfuscate,
+        post_exploit=args.post_exploit,
     )
 
 

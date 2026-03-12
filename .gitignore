@@ -37,3 +37,4 @@ report.sarif
 summary.txt
 summary.html
 *.sarif
+scans/

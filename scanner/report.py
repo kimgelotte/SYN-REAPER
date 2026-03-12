@@ -57,6 +57,12 @@ def _suggested_action(item: Dict, is_exploit: bool = False) -> str:
             return "Restrict API access; require authentication"
         if "version" in check:
             return "Update to patched version; check NVD for CVEs"
+        if "web" in check or "reflected_xss" in check or "xss" in details:
+            return "Encode/sanitize user input; use CSP; validate output"
+        if "path_traversal" in check or "lfi" in details or "possible lfi" in details:
+            return "Validate file paths; avoid user-controlled paths; use allowlists"
+        if "sqli" in check or "sqli probe" in check:
+            return "Use parameterized queries; input validation; least privilege DB user"
         return "Review and remediate as needed"
     # Finding
     if item.get("remediation"):
@@ -93,6 +99,7 @@ class ScanReport:
     timestamp: str
     hosts: List[HostResult] = field(default_factory=list)
     compliance_profile: Optional[str] = None
+    wifi_networks: Optional[List[Dict[str, Any]]] = None
 
     def add_host(
         self,
@@ -173,7 +180,7 @@ class ScanReport:
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
-        return {
+        d: Dict[str, Any] = {
             "target": self.target,
             "scan_type": self.scan_type,
             "timestamp": self.timestamp,
@@ -210,6 +217,9 @@ class ScanReport:
                 for h in self.hosts
             ],
         }
+        if self.wifi_networks is not None:
+            d["wifi_networks"] = self.wifi_networks
+        return d
 
     def write_json(self, path: str) -> None:
         """Write report as JSON."""

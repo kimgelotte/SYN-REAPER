@@ -18,6 +18,14 @@ paramiko>=3.0
 # pip install psycopg2  - PostgreSQL brute
 # pip install pymongo   - MongoDB auth check
 
-# Optional - for AI report analysis (analyze.py):
-# pip install openai      - AI executive summary
-# pip install python-dotenv - Load .env for API keys
+# Web interface (web_app.py):
+flask>=3.0
+
+# AI analysis and AI agent (analyze.py, ai_agent.py):
+openai
+python-dotenv
+
+# Optional - for extended database checks:
+# pip install psycopg2  - PostgreSQL brute/post-exploit
+# pip install pymongo   - MongoDB auth check
+# pip install pymysql   - MySQL brute/post-exploit

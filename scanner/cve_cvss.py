@@ -8,6 +8,8 @@ import urllib.error
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from scanner.obfuscate import get_http_headers
+
 # Local CVE data: CVE_ID -> (cvss_score, severity)
 # Extend as needed; NVD API fills in when available
 LOCAL_CVE_DB: Dict[str, Tuple[float, str]] = {
@@ -40,7 +42,7 @@ def get_cve_cvss(cve_id: str) -> Optional[Tuple[float, str]]:
     # Try NVD API (free, rate limited; 5 requests/min without API key)
     try:
         url = f"https://services.nvd.nist.gov/rest/json/cves/2.0?cveId={cve_id}"
-        req = urllib.request.Request(url, headers={"User-Agent": "SYN-REAPER/1.0"})
+        req = urllib.request.Request(url, headers=get_http_headers())
         with urllib.request.urlopen(req, timeout=5) as r:
             data = json.loads(r.read().decode())
         vulns = data.get("vulnerabilities", [])

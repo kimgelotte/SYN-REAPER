@@ -8,6 +8,8 @@ from typing import List, Optional
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
+from scanner.obfuscate import get_http_headers
+
 
 @dataclass
 class ContainerFinding:
@@ -31,7 +33,7 @@ def check_docker_api(host: str, port: int, use_tls: bool, timeout: float = 5.0) 
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
     try:
-        req = Request(url, headers={"User-Agent": "SYN-REAPER/1.0"})
+        req = Request(url, headers=get_http_headers())
         with urlopen(req, timeout=timeout, context=ctx) as r:
             data = r.read(2048).decode("utf-8", errors="ignore")
             if "ApiVersion" in data or "Version" in data:
@@ -53,7 +55,7 @@ def check_kubernetes_api(host: str, port: int, timeout: float = 5.0) -> Optional
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         try:
-            req = Request(url, headers={"User-Agent": "SYN-REAPER/1.0", "Authorization": "Bearer "})
+            req = Request(url, headers=get_http_headers(extra={"Authorization": "Bearer "}))
             with urlopen(req, timeout=timeout, context=ctx) as r:
                 data = r.read(4096).decode("utf-8", errors="ignore")
                 if "namespaces" in data or "k8s" in data.lower() or "gitVersion" in data:
@@ -71,7 +73,7 @@ def check_etcd(host: str, port: int, timeout: float = 5.0) -> Optional[Container
     """Check etcd (2379) for unauthenticated read of cluster state."""
     url = f"http://{host}:{port}/version"
     try:
-        req = Request(url, headers={"User-Agent": "SYN-REAPER/1.0"})
+        req = Request(url, headers=get_http_headers())
         with urlopen(req, timeout=timeout) as r:
             data = r.read(2048).decode("utf-8", errors="ignore")
             if "etcdserver" in data or "etcd" in data.lower():
