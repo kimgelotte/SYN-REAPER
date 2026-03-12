@@ -82,6 +82,9 @@ cp .env.example .env    # Linux/Mac
 | `SCAN_INJECTION` | `true`/`false` | SQL injection probes (including time-based blind) |
 | `SCAN_WEB_ADVANCED` | `true`/`false` | XSS reflection and path traversal probes (pentest-level) |
 | `SCAN_POST_EXPLOIT` | `true`/`false` | Post-exploitation recon after brute force (auto with pentest profile) |
+| `SCAN_AI_BRUTEFORCE` | `true`/`false` | Use AI to suggest bruteforce credentials per service |
+| `SCAN_INCLUDE_ROUTER` | `true`/`false` | Include default gateway (router) in pen test |
+| `SCAN_OBFUSCATE` | `true`/`false` | Browser-like User-Agents, random port order, pacing (reduces blocking) |
 | `SCAN_WIFI` | `true`/`false` | Scan nearby WiFi networks (wireless adapter) |
 | `SCAN_UDP` | `true`/`false` | Include UDP port scan |
 | `SCAN_FINGERPRINT` | `true`/`false` | OS stack fingerprinting |
@@ -200,6 +203,9 @@ python main.py 192.168.1.0/24 -A -e -o results.sarif --compliance all
 | `--wifi`, `-W` | Scan nearby WiFi networks (system wireless adapter) |
 | `--include-router` | Include default gateway (router) in pen test: extra ports, admin paths, default creds |
 | `--obfuscate` | Reduce blocking: browser-like User-Agents, random port order, lower concurrency, pacing (slower, high-quality pen-test) |
+| `--post-exploit` | Post-exploitation recon after brute force (SMB/FTP/SSH/DB enum) |
+| `--mac` | Target by MAC address (uses ARP to resolve; target must be CIDR, requires scapy) |
+| `--rate-limit` | Delay between requests in seconds (throttle for production systems) |
 | `--profile` | `quick`, `standard`, `deep`, or `pentest` |
 | `--scope-file` | Restrict targets to IPs in file |
 | `--dry-run` | Show what would be scanned |
@@ -426,12 +432,19 @@ python ai_agent.py 192.168.1.0/24 --wifi-attack
 
 The AI can issue `ATTACK_WIFI <bssid>` to attack a WiFi network, then seamlessly transition to scanning discovered hosts.
 
-**Requirements:**
+**Automatic fallback:** If monitor mode is unavailable (no compatible adapter, Windows without Npcap, Scapy not installed), the tool automatically falls back to **online brute-force** -- it tries connecting to the WiFi directly with each password from the wordlist (built-in + AI-generated + user-supplied). This is slower (~5-10s per attempt) but works on any OS with any standard WiFi card, no extra hardware needed. Monitor mode remains the preferred path when available.
+
+**Requirements (full monitor-mode path):**
 - **Linux recommended** for WiFi attack phase (monitor mode, raw packet injection)
 - Monitor-mode capable WiFi adapter (e.g. Alfa AWUS036ACH)
 - Root/admin privileges for monitor mode
 - hashcat (GPU) or aircrack-ng (CPU) for key cracking
 - Windows: Npcap + compatible adapter (limited support)
+
+**Requirements (online brute-force fallback):**
+- Any WiFi adapter (built-in laptop WiFi works)
+- Any OS (Windows, Linux, macOS)
+- No special privileges beyond WiFi connection rights
 
 **Post-exploitation** (`--post-exploit`): After brute force cracks credentials, SYN-REAPER enumerates what's accessible:
 - SMB shares (read/write permissions, sensitive files)
@@ -552,7 +565,24 @@ python analyze.py report.json --persona redteam -o redteam.txt
 
 The **AI agent** discovers hosts, then decides which host to scan next and when to stop. For each chosen host it runs a **full scan** (ports, vulnerabilities, exploits, brute force). One merged report and a live log are produced.
 
-**CLI:** `python ai_agent.py 192.168.1.0/24` or `python ai_agent.py 192.168.1.0/24 -o report.json --max-steps 20`
+**CLI:**
+
+```bash
+python ai_agent.py 192.168.1.0/24
+python ai_agent.py 192.168.1.0/24 -o report.json --max-steps 20
+python ai_agent.py 192.168.1.0/24 --wifi-attack    # AI drives WiFi attack chain
+```
+
+| Option | Description |
+|--------|-------------|
+| `target` | Target IP or CIDR (e.g. `192.168.1.0/24`) |
+| `-o`, `--output` | Output report path (default: `scans/ai_agent_report.json`) |
+| `--max-steps` | Max scan steps before stopping (default: 30) |
+| `--wifi-attack` | Enable AI to attack external WiFi networks (scan, crack, connect, pen-test) |
+| `--wifi-only` | Restrict AI to only the target WiFi network and its devices |
+| `--no-router` | Do not add the default gateway to the host list |
+| `--no-scan-all` | Use ping discovery only (default scans all IPs in CIDR) |
+| `-A`, `--scan-all` | Discover all IPs without ping (default: enabled) |
 
 **Web UI:** Home page → **"Let AI run the pen test"** → enter target → **"Start AI agent scan"** → live log. Requires `OPENAI_API_KEY` or `OPENAI_API_BASE` in `.env`.
 
